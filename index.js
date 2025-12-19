@@ -21,7 +21,7 @@ const normalize = (n) => n.replace(/\D/g, "").replace(/^0/, "234");
 
 /* ========= WHATSAPP PAIR ========= */
 async function pairNumber(number) {
-  const dir = path.join(SESSION_DIR, number);
+  const dir = `./session/${number}`;
   if (fs.existsSync(dir)) fs.rmSync(dir, { recursive: true, force: true });
 
   const { state, saveCreds } = await useMultiFileAuthState(dir);
@@ -30,15 +30,29 @@ async function pairNumber(number) {
     auth: state,
     printQRInTerminal: false,
     browser: ["Krypton-V1", "Chrome", "120"],
-    logger
+    logger: pino({ level: "silent" })
   });
 
   sock.ev.on("creds.update", saveCreds);
 
-  await new Promise(r => setTimeout(r, 2500));
-  return await sock.requestPairingCode(number);
-}
+  return new Promise((resolve, reject) => {
+    sock.ev.on("connection.update", async (u) => {
+      if (u.connection === "open" && !state.creds.registered) {
+        try {
+          await new Promise(r => setTimeout(r, 3000)); // REQUIRED
+          const code = await sock.requestPairingCode(number);
+          resolve(code);
+        } catch (e) {
+          reject(e);
+        }
+      }
 
+      if (u.connection === "close") {
+        reject(new Error("Connection closed"));
+      }
+    });
+  });
+}
 /* ========= MENU ========= */
 bot.command("menu", async (ctx) => {
   if (!isAdmin(ctx)) return;
