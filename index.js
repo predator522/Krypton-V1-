@@ -1,167 +1,146 @@
-const { Telegraf, Markup } = require("telegraf");
-const {
-  default: makeWASocket,
+import { Telegraf, Markup } from "telegraf";
+import makeWASocket, {
   useMultiFileAuthState,
   DisconnectReason
-} = require("@whiskeysockets/baileys");
-const pino = require("pino");
+} from "@whiskeysockets/baileys";
+import pino from "pino";
+import fs from "fs";
+import path from "path";
 
-const BOT_TOKEN = "8335889026:AAFa-CHOPPmIqIeOT33qvp6gHh2NAbKK1Gw";
-if (!BOT_TOKEN) {
-  console.error("❌ BOT_TOKEN missing");
+// ================== CONFIG ==================
+const BOT_TOKEN = process.env.BOT_TOKEN;
+const ADMIN_ID = Number(process.env.ADMIN_ID);
+const SESSION_DIR = "./session";
+
+// ================== SAFETY CHECK ==================
+if (!BOT_TOKEN || !ADMIN_ID) {
+  console.error("❌ Missing BOT_TOKEN or ADMIN_ID");
   process.exit(1);
 }
 
+// ================== LOGGER ==================
+const logger = pino({
+  level: "info",
+  transport: {
+    target: "pino-pretty",
+    options: { colorize: true }
+  }
+});
+
+// ================== TELEGRAM BOT ==================
 const bot = new Telegraf(BOT_TOKEN);
 
-// =====================
-// WhatsApp Socket
-// =====================
-let sock;
-let authState;
+// ================== HELPERS ==================
+const isAdmin = (ctx) => ctx.from?.id === ADMIN_ID;
 
-async function initWA() {
-  authState = await useMultiFileAuthState("./session");
+const normalizeNumber = (num) =>
+  num.replace(/\D/g, "").replace(/^0/, "234");
 
-  sock = makeWASocket({
-    logger: pino({ level: "silent" }),
+// ================== WHATSAPP PAIRING ==================
+async function requestPair(number) {
+  const sessionPath = path.join(SESSION_DIR, number);
+  if (fs.existsSync(sessionPath)) {
+    fs.rmSync(sessionPath, { recursive: true, force: true });
+  }
+
+  const { state, saveCreds } = await useMultiFileAuthState(sessionPath);
+
+  const sock = makeWASocket({
+    auth: state,
+    logger,
     printQRInTerminal: false,
-    auth: authState.state,
     browser: ["Krypton-V1", "Chrome", "120"]
   });
 
-  sock.ev.on("creds.update", authState.saveCreds);
+  sock.ev.on("creds.update", saveCreds);
 
-  sock.ev.on("connection.update", ({ connection, lastDisconnect }) => {
-    if (connection === "open") {
-      console.log("✅ WhatsApp connected");
-    }
-    if (connection === "close") {
-      const reason =
-        lastDisconnect?.error?.output?.statusCode;
-
-      if (reason !== DisconnectReason.loggedOut) {
-        console.log("🔁 Reconnecting WhatsApp…");
-        initWA();
-      } else {
-        console.log("❌ Logged out from WhatsApp");
-      }
+  return new Promise(async (resolve, reject) => {
+    try {
+      await new Promise(r => setTimeout(r, 2500));
+      const code = await sock.requestPairingCode(number);
+      resolve(code);
+    } catch (e) {
+      reject(e);
     }
   });
 }
 
-initWA();
+// ================== MENU ==================
+bot.command("menu", async (ctx) => {
+  if (!isAdmin(ctx)) return ctx.reply("❌ Unauthorized");
 
-// =====================
-// Inline Menu
-// =====================
-const menuKeyboard = Markup.inlineKeyboard([
-  [Markup.button.callback("📲 Request Pair", "REQ_PAIR")],
-  [Markup.button.callback("🗑 Delete Session", "DEL_PAIR")],
-  [Markup.button.callback("ℹ️ Help", "HELP")]
-]);
-
-// =====================
-// Commands
-// =====================
-bot.start((ctx) => {
-  ctx.reply(
-    "👋 Welcome to *Krypton Pairing Bot*\n\nChoose an option:",
+  await ctx.reply(
+    "👑 *Krypton-V1 Control Panel*",
     {
       parse_mode: "Markdown",
-      ...menuKeyboard
+      ...Markup.inlineKeyboard([
+        [Markup.button.callback("📲 Request Pair", "REQPAIR")],
+        [Markup.button.callback("🗑 Delete Pair", "DELPAIR")]
+      ])
     }
   );
 });
 
-bot.command("menu", (ctx) => {
-  console.log("📥 /menu from", ctx.from.id);
-  ctx.reply("📂 *Main Menu*", {
-    parse_mode: "Markdown",
-    ...menuKeyboard
-  });
+// ================== INLINE CALLBACKS ==================
+bot.action("REQPAIR", (ctx) => {
+  ctx.answerCbQuery();
+  ctx.reply("📲 Send:\n`/reqpair 234XXXXXXXXX`", { parse_mode: "Markdown" });
 });
 
-// =====================
-// Inline Actions
-// =====================
-bot.action("REQ_PAIR", async (ctx) => {
-  await ctx.answerCbQuery();
-  ctx.reply(
-    "📥 Send command:\n\n`/reqpair 234XXXXXXXXXX`",
-    { parse_mode: "Markdown" }
-  );
+bot.action("DELPAIR", (ctx) => {
+  ctx.answerCbQuery();
+  ctx.reply("🗑 Send:\n`/delpair 234XXXXXXXXX`", { parse_mode: "Markdown" });
 });
 
-bot.action("DEL_PAIR", async (ctx) => {
-  await ctx.answerCbQuery();
-  ctx.reply("⚠️ Send `/delpair` to delete WhatsApp session", {
-    parse_mode: "Markdown"
-  });
-});
-
-bot.action("HELP", async (ctx) => {
-  await ctx.answerCbQuery();
-  ctx.reply(
-    "ℹ️ *Help*\n\n" +
-      "• `/menu` – Show menu\n" +
-      "• `/reqpair number` – Get pairing code\n" +
-      "• `/delpair` – Delete session",
-    { parse_mode: "Markdown" }
-  );
-});
-
-// =====================
-// Pairing Command
-// =====================
+// ================== COMMANDS ==================
 bot.command("reqpair", async (ctx) => {
-  const args = ctx.message.text.split(" ");
-  const number = args[1];
+  if (!isAdmin(ctx)) return;
 
-  console.log("📥 /reqpair:", number);
+  const num = ctx.message.text.split(" ")[1];
+  if (!num) return ctx.reply("❌ Usage: /reqpair 234XXXXXXXXX");
 
-  if (!number || !/^\d+$/.test(number)) {
-    return ctx.reply("❌ Usage: `/reqpair 234XXXXXXXXXX`", {
-      parse_mode: "Markdown"
-    });
-  }
+  const number = normalizeNumber(num);
+  logger.info(`📲 Pair requested: ${number}`);
 
   try {
-    if (!sock?.authState?.creds?.registered) {
-      const code = await sock.requestPairingCode(number);
-      ctx.reply(`✅ *Pairing Code:*\n\n\`${code}\``, {
-        parse_mode: "Markdown"
-      });
-    } else {
-      ctx.reply("⚠️ Already paired.");
-    }
-  } catch (err) {
-    console.error("❌ Pairing failed:", err.message);
-    ctx.reply("❌ Pairing failed. Try again later.");
-  }
-});
-
-// =====================
-// Delete Session
-// =====================
-bot.command("delpair", async (ctx) => {
-  const fs = require("fs");
-
-  try {
-    fs.rmSync("./session", { recursive: true, force: true });
-    ctx.reply("🗑 WhatsApp session deleted.\nRestart bot.");
-    process.exit(0);
+    const code = await requestPair(number);
+    ctx.reply(`✅ *Pairing Code*\n\`${code}\``, { parse_mode: "Markdown" });
   } catch (e) {
-    ctx.reply("❌ No session found.");
+    logger.error(e, "❌ Pairing failed");
+    ctx.reply("❌ Failed to get pairing code");
   }
 });
 
-// =====================
-// Launch Bot
-// =====================
-bot.launch()
-  .then(() => console.log("🤖 Telegram bot started"))
-  .catch((err) => console.error("❌ Launch failed:", err));
+bot.command("delpair", (ctx) => {
+  if (!isAdmin(ctx)) return;
 
-process.on("SIGINT", () => bot.stop("SIGINT"));
-process.on("SIGTERM", () => bot.stop("SIGTERM"));
+  const num = ctx.message.text.split(" ")[1];
+  if (!num) return ctx.reply("❌ Usage: /delpair 234XXXXXXXXX");
+
+  const number = normalizeNumber(num);
+  const dir = path.join(SESSION_DIR, number);
+
+  if (fs.existsSync(dir)) {
+    fs.rmSync(dir, { recursive: true, force: true });
+    ctx.reply(`✅ Session deleted for ${number}`);
+  } else {
+    ctx.reply("⚠️ No session found");
+  }
+});
+
+// ================== GLOBAL ERROR HANDLER ==================
+bot.catch((err) => {
+  logger.error(err, "🔥 Telegram Error");
+});
+
+// ================== START ==================
+bot.launch()
+  .then(() => logger.info("🚀 Krypton-V1 LIVE (Render)"))
+  .catch(err => {
+    logger.error(err, "❌ Launch failed");
+    process.exit(1);
+  });
+
+// ================== GRACEFUL SHUTDOWN ==================
+process.once("SIGINT", () => bot.stop("SIGINT"));
+process.once("SIGTERM", () => bot.stop("SIGTERM"));
