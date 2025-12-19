@@ -1,0 +1,15 @@
+{
+  "name": "krypton-v1",
+  "version": "1.0.0",
+  "description": "Telegram → WhatsApp pairing bot",
+  "main": "index.js",
+  "type": "commonjs",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "@whiskeysockets/baileys": "^6.7.9",
+    "telegraf": "^4.16.3",
+    "pino": "^9.0.0"
+  }
+}
